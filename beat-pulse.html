@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="theme-color" content="#08021a">
+<title>BEAT PULSE - 네온 리듬 게임</title>
+<style>
+html,body{margin:0;height:100%;background:#08021a;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+/* =========================================================
+   BEAT PULSE — 4레인 네온 리듬 게임 (음악은 WebAudio로 실시간 합성)
+   ========================================================= */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const LH = 600, TAU = Math.PI * 2, PI = Math.PI;
+const FONT = '"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif';
+let W, H, S, LW, DPR;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const pick = a => a[(Math.random() * a.length) | 0];
+const eo = t => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
+const eb = t => { t = clamp(t, 0, 1); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+
+/* ---------------- 오디오 ---------------- */
+let AC = null, MG = null, NB = null, muted = false;
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  MG = AC.createGain(); MG.gain.value = .5;
+  const comp = AC.createDynamicsCompressor(); MG.connect(comp); comp.connect(AC.destination);
+  NB = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+  const d = NB.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function tone(f1, f2, dur, type, vol, at) {
+  if (!AC || muted) return;
+  const t = Math.max(at || 0, AC.currentTime), o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'sine'; o.frequency.setValueAtTime(f1, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f2), t + dur);
+  g.gain.setValueAtTime(.0001, t); g.gain.linearRampToValueAtTime(vol, t + .004); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g); g.connect(MG); o.start(t); o.stop(t + dur + .05);
+}
+function noise(dur, f1, f2, vol, q, at, ft) {
+  if (!AC || muted) return;
+  const t = Math.max(at || 0, AC.currentTime), s = AC.createBufferSource(); s.buffer = NB;
+  const f = AC.createBiquadFilter(); f.type = ft || 'bandpass'; f.Q.value = q || 1;
+  f.frequency.setValueAtTime(f1, t); f.frequency.exponentialRampToValueAtTime(Math.max(20, f2), t + dur);
+  const g = AC.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(MG); s.start(t, Math.random() * .6); s.stop(t + dur + .05);
+}
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+function playEv(e, t, spb) {
+  switch (e.t) {
+    case 'k': tone(160, 38, .24, 'sine', .6, t); noise(.02, 4000, 2000, .08, 1, t); break;
+    case 's': noise(.17, 2000, 800, .26, .8, t); tone(230, 120, .09, 'triangle', .12, t); break;
+    case 'h': noise(.035, 9500, 7000, e.o ? .07 : .045, 1, t, 'highpass'); break;
+    case 'b': tone(mtof(e.m), mtof(e.m) * .995, spb * 1.8, 'sawtooth', .07, t); tone(mtof(e.m - 12), mtof(e.m - 12), spb * 1.8, 'sine', .12, t); break;
+    case 'l': tone(mtof(e.m), mtof(e.m), spb * e.d * .95, 'square', .035, t); tone(mtof(e.m + 12), mtof(e.m + 12) * 1.003, spb * e.d * .7, 'triangle', .025, t); break;
+    case 'p': for (const i of [0, 3, 7, 10]) tone(mtof(e.m + i), mtof(e.m + i), spb * 15, 'triangle', .022, t); break;
+  }
+}
+
+/* ---------------- 곡 데이터 & 채보 생성 ---------------- */
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const SONGS = [
+  { id: 'drift', name: 'NEON DRIFT', sub: '네온 드리프트', bpm: 110, diff: 1, root: 57, seed: 11, col: '#3ff0ff', col2: '#2a6bff', secs: [[2, 0], [8, 1], [8, 2], [8, 2], [2, 1]] },
+  { id: 'circuit', name: 'MIDNIGHT CIRCUIT', sub: '미드나잇 서킷', bpm: 128, diff: 2, root: 50, seed: 23, col: '#ff3df5', col2: '#7a2bff', secs: [[2, 0], [8, 2], [4, 1], [8, 3], [8, 2], [2, 1]] },
+  { id: 'hyper', name: 'HYPER PULSE', sub: '하이퍼 펄스', bpm: 150, diff: 3, root: 52, seed: 37, col: '#ffd84a', col2: '#ff4d2b', secs: [[2, 1], [8, 2], [8, 3], [4, 1], [8, 3], [2, 1]] }
+];
+const PROG = [0, 8, 3, 10], PENTA = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24];
+const RHY = [[0, 3, 6, 8, 11, 14], [0, 2, 4, 7, 10, 12], [0, 4, 6, 8, 12, 14], [0, 3, 6, 10, 12], [0, 6, 8, 10, 14]];
+function buildSong(sg) {
+  const rng = mulberry(sg.seed), d = sg.diff - 1, ev = [], notes = [], barInt = [];
+  const busy = [-1, -1, -1, -1], used = {};
+  let bar = 0, kt = 0, st2 = 0;
+  const addNote = (step, lane, len) => {
+    if ((used[step] || 0) >= 2) return;
+    for (let k = 0; k < 4; k++) {
+      const c = (lane + k) % 4;
+      if (busy[c] < step && !used[step + '_' + c]) {
+        used[step] = (used[step] || 0) + 1; used[step + '_' + c] = 1; busy[c] = step + (len ? len + 1 : 0);
+        notes.push({ step, lane: c, len }); return;
+      }
+    }
+  };
+  for (const [nb, I] of sg.secs) for (let i = 0; i < nb; i++, bar++) {
+    barInt.push(I);
+    const base = bar * 16, ch = PROG[bar % 4], broot = sg.root - 24 + ch, rhy = RHY[(rng() * RHY.length) | 0];
+    let pi = 3 + ((rng() * 4) | 0);
+    const leadOn = I >= 2 || (I === 1 && bar % 2 === 1);
+    for (let s = 0; s < 16; s++) {
+      const st = base + s;
+      if ((I >= 1 && s % 4 === 0) || (I === 3 && (s === 10 || (s === 14 && bar % 2)))) ev.push({ st, t: 'k' });
+      if ((I >= 2 && (s === 4 || s === 12)) || (I === 3 && s === 15 && bar % 4 === 3)) ev.push({ st, t: 's' });
+      if (I >= 1 && (s % 4 === 2 || (I === 3 && s % 2 === 1))) ev.push({ st, t: 'h', o: s % 4 === 2 });
+      if (I >= 1 && s % 2 === 0) ev.push({ st, t: 'b', m: broot + (s % 8 === 6 ? 12 : 0) });
+    }
+    if (I <= 1 && bar % 2 === 0) ev.push({ st: base, t: 'p', m: sg.root - 12 + ch });
+    // 홀드 노트
+    if (bar > 0 && (I <= 1) && bar % 2 === 1) addNote(base, (rng() * 4) | 0, 8);
+    if (d === 0 && I >= 2 && bar % 4 === 2) addNote(base + 8, (rng() * 4) | 0, 6);
+    // 킥 / 스네어
+    if (I >= 1) for (const s of d === 0 ? [0, 8] : d === 1 ? [0, 4, 8, 12] : (I === 3 ? [0, 4, 8, 10, 12] : [0, 4, 8, 12])) { addNote(base + s, kt % 2 ? 3 : 0, 0); kt++; }
+    if (I >= 2 && d >= 1) for (const s of [4, 12]) { addNote(base + s, st2 % 2 ? 2 : 1, 0); st2++; }
+    // 리드 멜로디
+    if (leadOn) for (const s of rhy) {
+      pi = clamp(pi + ((rng() * 5) | 0) - 2, 0, PENTA.length - 1);
+      const dur = s === rhy[rhy.length - 1] ? 3 : 2;
+      ev.push({ st: base + s, t: 'l', m: sg.root + PENTA[pi], d: dur });
+      if ((d === 2 && I >= 2) || (d === 1 && I >= 2 && s % 2 === 0) || (d === 0 && I >= 2 && s % 4 === 0 && s % 8 !== 0)) addNote(base + s, Math.floor(pi / PENTA.length * 4), 0);
+    }
+  }
+  ev.sort((a, b) => a.st - b.st);
+  notes.sort((a, b) => a.step - b.step || a.lane - b.lane);
+  const spb = 60 / sg.bpm / 4;
+  return { ev, notes, barInt, spb, bars: bar, len: bar * 16 * spb };
+}
+SONGS.forEach(s => { const b = buildSong(s); s.noteCount = b.notes.length + b.notes.filter(n => n.len).length; s.dur = b.len; });
+
+/* ---------------- 상태 ---------------- */
+let state = 'select', sel = 0, song = null, chart = null, notes = [], gameT = 0, t0 = 0, acAnchor = null, evI = 0, time = 0, stT = 0;
+let score = 0, dispScore = 0, combo = 0, maxCombo = 0, comboPop = 0, fever = false, feverT = 0, counts = { P: 0, G: 0, O: 0, M: 0 }, totalJ = 1;
+let held = [false, false, false, false], recv = [0, 0, 0, 0], laneFlash = [0, 0, 0, 0], laneMiss = [0, 0, 0, 0], judgeShow = null;
+let parts = [], rings = [], texts = [], banners = [], eq = new Array(32).fill(0), shake = 0, flash = 0, flashCol = '#fff', missFx = 0;
+let speedMod = 1, offsetMs = 0, best = {}, newRecord = false, resultT = 0, selPop = 0, isTouch = false, finished = false;
+try { best = JSON.parse(localStorage.getItem('beatPulseBest') || '{}') || {}; if (typeof best !== 'object') best = {}; } catch (e) { best = {}; }
+try { const o = JSON.parse(localStorage.getItem('beatPulseOpt') || '{}'); speedMod = o.speed || 1; offsetMs = o.offset || 0; } catch (e) {}
+const saveOpt = () => { try { localStorage.setItem('beatPulseOpt', JSON.stringify({ speed: speedMod, offset: offsetMs })); } catch (e) {} };
+const KEYS = ['KeyD', 'KeyF', 'KeyJ', 'KeyK'], KEYL = ['D', 'F', 'J', 'K'];
+const songT = () => gameT - t0 - offsetMs / 1000;
+const WIN = { P: .045, G: .09, O: .13 };
+const JNAME = { P: 'PERFECT', G: 'GREAT', O: 'GOOD', M: 'MISS' }, JCOL = { P: '#7ffcff', G: '#ff9df9', O: '#ffd84a', M: '#ff2d55' }, JW = { P: 1, G: .7, O: .4, M: 0 };
+
+/* ---------------- 레이아웃 ---------------- */
+const JY = () => LH - 110;
+const laneW = () => Math.min(88, (LW - 24) / 4);
+const laneX = l => LW / 2 - 2 * laneW() + l * laneW();
+const laneCol = l => fever ? `hsl(${(time * 160 + l * 70) % 360},100%,65%)` : (l === 0 || l === 3 ? song.col : '#ffffff');
+const noteSpeed = () => 520 * speedMod;
+
+/* ---------------- 이펙트 ---------------- */
+function addPart(x, y, vx, vy, life, size, col, type, g) { if (parts.length > 900) parts.shift(); parts.push({ x, y, vx, vy, life, max: life, size, col, type: type || 'spark', g: g || 0 }); }
+function sparks(x, y, n, cols, pow) { for (let i = 0; i < n; i++) { const a = rnd(PI, TAU), v = rnd(150, 600) * (pow || 1); addPart(x, y, Math.cos(a) * v * .7, Math.sin(a) * v, rnd(.25, .55), rnd(1.5, 3.5), pick(cols), 'spark', 600); } }
+function ring(x, y, r0, r1, col, life, w) { rings.push({ x, y, r0, r1, col, life, max: life, w }); }
+function banner(txt, sub, col, dur) { banners = [{ txt, sub, col, t: 0, dur: dur || 1.5 }]; }
+
+/* ---------------- 게임 흐름 ---------------- */
+function startSong(i) {
+  initAudio();
+  song = SONGS[i]; chart = buildSong(song);
+  notes = chart.notes.map(n => ({ lane: n.lane, time: n.step * chart.spb, end: (n.step + n.len) * chart.spb, len: n.len, done: false, holding: false, tailDone: !n.len }));
+  totalJ = notes.length + notes.filter(n => n.len).length;
+  gameT = 0; t0 = 2.6; acAnchor = null; evI = 0; finished = false;
+  score = 0; dispScore = 0; combo = 0; maxCombo = 0; fever = false; feverT = 0; counts = { P: 0, G: 0, O: 0, M: 0 };
+  held = [false, false, false, false]; parts = []; rings = []; texts = []; judgeShow = null; newRecord = false;
+  state = 'play'; stT = 0; flash = .6; flashCol = song.col;
+  banner(song.name, song.sub + '  ·  BPM ' + song.bpm, song.col, 2);
+  tone(300, 1200, .4, 'sawtooth', .08);
+}
+function judge(n, g, dt) {
+  counts[g]++;
+  const x = laneX(n.lane) + laneW() / 2, y = JY();
+  if (g === 'M') {
+    combo = 0; fever = false; missFx = 1; shake = Math.max(shake, 7); laneMiss[n.lane] = .35;
+    judgeShow = { g, t: 0, dt: 0 };
+    return;
+  }
+  combo++; comboPop = 1; if (combo > maxCombo) maxCombo = combo;
+  const base = 1000000 / totalJ;
+  score += Math.round(base * JW[g] * (fever ? 2 : 1)) + combo * 3;
+  judgeShow = { g, t: 0, dt };
+  laneFlash[n.lane] = 1;
+  const c = laneCol(n.lane);
+  sparks(x, y, g === 'P' ? 22 : 14, [c, '#fff', JCOL[g]], g === 'P' ? 1.2 : .9);
+  ring(x, y, 8, g === 'P' ? 80 : 60, JCOL[g], .35, g === 'P' ? 5 : 3);
+  if (g === 'P') ring(x, y, 4, 40, '#fff', .2, 4);
+  for (let i = 0; i < 6; i++) eq[(Math.random() * 32) | 0] = 1;
+  if (!muted && AC) tone(2400, 1800, .025, 'sine', .03);
+  if (combo === 50 || (combo > 50 && !fever)) { if (!fever) { fever = true; feverT = 0; banner('FEVER!!', '점수 ×2', '#ffd84a', 1.4); flash = .6; flashCol = '#ffd84a'; for (let l = 0; l < 4; l++) ring(laneX(l) + laneW() / 2, y, 10, 160, '#ffd84a', .6, 6); tone(400, 1600, .4, 'sawtooth', .07); } }
+  if (combo > 0 && combo % 100 === 0) banner(combo + ' COMBO', '', '#7ffcff', 1.1);
+}
+function press(l) {
+  recv[l] = 1; held[l] = true;
+  if (state !== 'play') return null;
+  const t = songT();
+  let hit = null, bdt = 0;
+  for (const n of notes) {
+    if (n.lane !== l || n.done || n.holding) continue;
+    const dt = t - n.time;
+    if (dt < -WIN.O) break;
+    if (Math.abs(dt) <= WIN.O) { hit = n; bdt = dt; break; }
+  }
+  if (!hit) return null;
+  const a = Math.abs(bdt), g = a <= WIN.P ? 'P' : a <= WIN.G ? 'G' : 'O';
+  judge(hit, g, bdt);
+  if (hit.len) hit.holding = true; else hit.done = true;
+  return g;
+}
+function release(l) {
+  held[l] = false;
+  if (state !== 'play') return;
+  const t = songT();
+  for (const n of notes) if (n.lane === l && n.holding) {
+    n.holding = false; n.done = true; n.tailDone = true;
+    if (t < n.end - WIN.O) { judge(n, 'M', 0); addTextLane(l, 'BREAK', '#ff2d55'); }
+    else { judge(n, 'P', 0); }
+  }
+}
+function addTextLane(l, s, col) { texts.push({ x: laneX(l) + laneW() / 2, y: JY() - 40, s, col, t: 0, max: .7, size: 16 }); }
+function finishSong() {
+  finished = true; state = 'result'; resultT = 0;
+  const prev = best[song.id] || 0;
+  if (score > prev) { best[song.id] = score; newRecord = true; try { localStorage.setItem('beatPulseBest', JSON.stringify(best)); } catch (e) {} }
+}
+function accuracy() { const n = counts.P + counts.G + counts.O + counts.M; return n ? (counts.P + counts.G * .7 + counts.O * .4) / n * 100 : 0; }
+function rank() { const a = accuracy(); return a >= 95 ? 'S' : a >= 85 ? 'A' : a >= 70 ? 'B' : 'C'; }
+
+/* ---------------- 업데이트 ---------------- */
+function update(dt) {
+  time += dt; stT += dt; selPop = Math.max(0, selPop - dt * 3);
+  shake *= Math.pow(.002, dt); if (shake < .2) shake = 0;
+  if (flash > 0) flash -= dt * 2; missFx = Math.max(0, missFx - dt * 3);
+  comboPop = Math.max(0, comboPop - dt * 5);
+  for (let l = 0; l < 4; l++) { recv[l] = Math.max(held[l] ? .6 : 0, recv[l] - dt * 6); laneFlash[l] = Math.max(0, laneFlash[l] - dt * 4); laneMiss[l] = Math.max(0, laneMiss[l] - dt); }
+  for (const b of banners) b.t += dt; banners = banners.filter(b => b.t < b.dur);
+  if (judgeShow) judgeShow.t += dt;
+  for (let i = 0; i < 32; i++) eq[i] *= Math.pow(.02, dt);
+  if (state === 'play') {
+    gameT += dt;
+    if (AC && AC.state === 'running' && !window.TEST_CLOCK) { if (acAnchor == null) acAnchor = AC.currentTime - gameT; else gameT = AC.currentTime - acAnchor; }
+    // 음악 스케줄
+    while (evI < chart.ev.length && t0 + chart.ev[evI].st * chart.spb < gameT + .15) {
+      const e = chart.ev[evI], te = t0 + e.st * chart.spb;
+      if (acAnchor != null && te + acAnchor > AC.currentTime - .03) playEv(e, te + acAnchor, chart.spb);
+      evI++;
+    }
+    const t = songT();
+    for (const n of notes) {
+      if (n.done) continue;
+      if (n.holding) {
+        if (t >= n.end) { n.holding = false; n.done = true; n.tailDone = true; judge(n, 'P', 0); addTextLane(n.lane, 'HOLD!', '#7ffcff'); }
+        else { score += Math.round(dt * 300); if (Math.random() < .7) addPart(laneX(n.lane) + laneW() / 2 + rnd(-18, 18), JY(), rnd(-30, 30), rnd(-500, -200), .4, rnd(2, 3.5), laneCol(n.lane), 'spark'); laneFlash[n.lane] = Math.max(laneFlash[n.lane], .5); }
+      } else if (t - n.time > WIN.O) {
+        n.done = true; judge(n, 'M', 0);
+        if (n.len) { counts.M++; }
+      }
+    }
+    // 시각적 비트 → EQ
+    const beatLen = chart.spb * 4, sT = songT();
+    if (sT > 0) { const bar = Math.floor(sT / (beatLen * 4)), I = chart.barInt[bar] || 0, ph = (sT / beatLen) % 1; if (ph < .08 && I >= 1) for (let i = 0; i < 32; i++) eq[i] = Math.max(eq[i], rnd(.3, .6 + I * .13)); }
+    if (fever) feverT += dt;
+    dispScore = lerp(dispScore, score, 1 - Math.pow(.001, dt));
+    if (!finished && t > chart.len + 1.2 && notes.every(n => n.done)) finishSong();
+  }
+  if (state === 'result') { resultT += dt; dispScore = lerp(dispScore, score, 1 - Math.pow(.02, dt)); }
+  for (const p of parts) { p.life -= dt; p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= Math.pow(.3, dt); }
+  parts = parts.filter(p => p.life > 0);
+  for (const r of rings) r.life -= dt; rings = rings.filter(r => r.life > 0);
+  for (const t of texts) { t.t += dt; t.y -= 50 * dt; } texts = texts.filter(t => t.t < t.max);
+}
+
+/* ---------------- 그리기 ---------------- */
+function txt(s, x, y, size, col, o) {
+  o = o || {};
+  ctx.font = `${o.it === false ? '' : 'italic '}900 ${size}px ${FONT}`;
+  ctx.textAlign = o.al || 'center'; ctx.textBaseline = 'middle';
+  if (o.st) { ctx.lineWidth = o.st; ctx.strokeStyle = o.sc || 'rgba(5,2,15,.9)'; ctx.lineJoin = 'round'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = col; ctx.fillText(s, x, y);
+}
+function para(x, y, w, h, sk) { ctx.beginPath(); ctx.moveTo(x + sk, y); ctx.lineTo(x + w + sk, y); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); ctx.closePath(); }
+function beatInfo() {
+  const sg = song || SONGS[sel], bl = 60 / sg.bpm;
+  if (state === 'play') { const t = songT(); const bar = Math.floor(t / (bl * 4)), I = t < 0 ? 0 : (chart.barInt[bar] == null ? 0 : chart.barInt[bar]); return { beat: t / bl, I, bl }; }
+  return { beat: time / bl, I: 1, bl };
+}
+function drawBG() {
+  const sg = state === 'select' ? SONGS[sel] : song, bi = beatInfo(), ph = ((bi.beat % 1) + 1) % 1, pulse = bi.I >= 1 || state !== 'play' ? Math.pow(1 - ph, 3) : 0;
+  const c1 = fever ? `hsl(${(time * 60) % 360},80%,14%)` : '#0a0322';
+  const g = ctx.createRadialGradient(LW / 2, LH * .45, 20, LW / 2, LH * .45, Math.max(LW, LH) * .8);
+  g.addColorStop(0, fever ? `hsl(${(time * 60 + 40) % 360},90%,22%)` : sg.col2 + '55'); g.addColorStop(.5, c1); g.addColorStop(1, '#04010d');
+  ctx.fillStyle = g; ctx.fillRect(-40, -40, LW + 80, LH + 80);
+  // 터널
+  const cx = LW / 2, cy = LH * .42, sp = fever ? 2 : 1;
+  ctx.save(); ctx.translate(cx, cy);
+  for (let i = 0; i < 12; i++) {
+    const k = ((i + (bi.beat * sp) % 1) / 12), r = Math.pow(k, 2.2) * Math.max(LW, LH) * 1.3;
+    ctx.save(); ctx.rotate(bi.beat * .08 + i * .05);
+    ctx.strokeStyle = fever ? `hsla(${(time * 120 + i * 30) % 360},100%,60%,${k * .5})` : sg.col; ctx.globalAlpha = fever ? 1 : k * .45; ctx.lineWidth = 1 + k * 3;
+    ctx.beginPath(); for (let j = 0; j < 6; j++) { const a = j / 6 * TAU; ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); } ctx.closePath(); ctx.stroke(); ctx.restore();
+  }
+  ctx.globalAlpha = .12; ctx.strokeStyle = sg.col; ctx.lineWidth = 1;
+  for (let j = 0; j < 12; j++) { const a = j / 12 * TAU + bi.beat * .04; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * 2000, Math.sin(a) * 2000); ctx.stroke(); }
+  ctx.globalAlpha = 1;
+  // 가운데 숨쉬는 도형
+  const R = 70 + pulse * 30;
+  ctx.rotate(bi.beat * PI / 8);
+  ctx.globalCompositeOperation = 'lighter';
+  const cg = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 2.2); cg.addColorStop(0, fever ? 'rgba(255,216,74,.5)' : sg.col + '66'); cg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(0, 0, R * 2.2, 0, TAU); ctx.fill();
+  ctx.strokeStyle = fever ? '#ffd84a' : sg.col; ctx.lineWidth = 3 + pulse * 4;
+  ctx.beginPath(); for (let j = 0; j < 6; j++) { const a = j / 6 * TAU; ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R); } ctx.closePath(); ctx.stroke();
+  ctx.rotate(-bi.beat * PI / 4); ctx.lineWidth = 2; ctx.globalAlpha = .7;
+  ctx.beginPath(); for (let j = 0; j < 3; j++) { const a = j / 3 * TAU; ctx.lineTo(Math.cos(a) * R * .6, Math.sin(a) * R * .6); } ctx.closePath(); ctx.stroke();
+  ctx.restore();
+  // 비트 링
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  if (pulse > 0) { ctx.strokeStyle = fever ? '#ffd84a' : sg.col; ctx.globalAlpha = pulse * .6; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(cx, cy, 90 + (1 - pulse) * 260, 0, TAU); ctx.stroke(); }
+  ctx.restore();
+  // 이퀄라이저
+  if (state !== 'select') {
+    const bw = Math.max(6, (LW / 2 - 2 * laneW() - 20) / 16);
+    for (let i = 0; i < 32; i++) {
+      const side = i < 16 ? -1 : 1, k = i % 16, h = eq[i] * 200 + 4;
+      const x = side < 0 ? LW / 2 - 2 * laneW() - 14 - (k + 1) * bw : LW / 2 + 2 * laneW() + 14 + k * bw;
+      if (x < -bw || x > LW) continue;
+      ctx.fillStyle = fever ? `hsla(${(k * 20 + time * 100) % 360},100%,60%,.45)` : `hsla(${side < 0 ? 290 : 185},100%,${55 + k * 2}%,.35)`;
+      ctx.fillRect(x, LH - h, bw - 2, h);
+    }
+  }
+  if (missFx > 0) { ctx.fillStyle = `rgba(255,30,60,${missFx * .25})`; ctx.fillRect(-40, -40, LW + 80, LH + 80); }
+}
+function drawLanes() {
+  const lw = laneW(), x0 = laneX(0), jy = JY();
+  ctx.fillStyle = 'rgba(5,2,15,.55)'; ctx.fillRect(x0, 0, lw * 4, LH);
+  for (let l = 0; l < 4; l++) {
+    const x = laneX(l), c = laneCol(l);
+    if (laneFlash[l] > 0 || held[l]) {
+      const a = Math.max(laneFlash[l], held[l] ? .25 : 0);
+      const g = ctx.createLinearGradient(0, jy, 0, jy - 380); g.addColorStop(0, c); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = a * .45; ctx.fillStyle = g; ctx.fillRect(x, jy - 380, lw, 380); ctx.restore();
+    }
+    if (laneMiss[l] > 0) { ctx.fillStyle = `rgba(255,45,85,${laneMiss[l] * .5})`; ctx.fillRect(x, 0, lw, jy); }
+    ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LH); ctx.stroke();
+  }
+  ctx.strokeStyle = fever ? '#ffd84a' : song.col; ctx.lineWidth = 2; ctx.globalAlpha = .6;
+  ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, LH); ctx.moveTo(x0 + lw * 4, 0); ctx.lineTo(x0 + lw * 4, LH); ctx.stroke(); ctx.globalAlpha = 1;
+  // 판정선
+  const bi = beatInfo(), pulse = Math.pow(1 - (((bi.beat % 1) + 1) % 1), 3);
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = fever ? '#ffd84a' : song.col; ctx.globalAlpha = .35 + pulse * .4; ctx.fillRect(x0 - 6, jy - 5, lw * 4 + 12, 10);
+  ctx.globalAlpha = 1; ctx.fillStyle = '#fff'; ctx.fillRect(x0 - 6, jy - 1.5, lw * 4 + 12, 3); ctx.restore();
+  // 수신부
+  for (let l = 0; l < 4; l++) {
+    const x = laneX(l) + 4, w = lw - 8, c = laneCol(l), r = recv[l], sc = 1 + r * .08;
+    ctx.save(); ctx.translate(x + w / 2, jy + 38); ctx.scale(sc, sc);
+    ctx.fillStyle = r > 0 ? `rgba(255,255,255,${.08 + r * .25})` : 'rgba(255,255,255,.05)'; ctx.fillRect(-w / 2, -26, w, 52);
+    ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.globalAlpha = .4 + r * .6; ctx.strokeRect(-w / 2, -26, w, 52); ctx.globalAlpha = 1;
+    txt(KEYL[l], 0, 1, 22, r > .3 ? '#fff' : c, { it: false });
+    ctx.restore();
+  }
+}
+function drawNotes() {
+  const t = songT(), jy = JY(), sp = noteSpeed(), lw = laneW();
+  for (const n of notes) {
+    if (n.done && !n.holding) continue;
+    const yh = jy - (n.time - t) * sp;
+    if (yh < -40 && !n.len) break;
+    const x = laneX(n.lane) + 6, w = lw - 12, c = laneCol(n.lane);
+    if (n.len) {
+      const yt = jy - (n.end - t) * sp, yb = n.holding ? jy : yh;
+      if (yt > LH + 20) continue;
+      const g = ctx.createLinearGradient(0, yt, 0, yb); g.addColorStop(0, 'rgba(255,255,255,.15)'); g.addColorStop(1, c);
+      ctx.save(); ctx.globalAlpha = n.holding ? .85 + Math.sin(time * 30) * .15 : .55; ctx.fillStyle = g; ctx.fillRect(x + w * .2, yt, w * .6, yb - yt);
+      if (n.holding) { ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = c; ctx.globalAlpha = .3; ctx.fillRect(x, yt, w, yb - yt); }
+      ctx.restore();
+      ctx.fillStyle = c; ctx.fillRect(x + 4, yt - 4, w - 8, 8);
+      if (n.holding) continue;
+    }
+    if (yh < -30 || yh > LH + 30) continue;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = c; ctx.globalAlpha = .35; ctx.fillRect(x - 3, yh - 13, w + 6, 26); ctx.restore();
+    const ng = ctx.createLinearGradient(0, yh - 10, 0, yh + 10); ng.addColorStop(0, '#fff'); ng.addColorStop(1, c);
+    ctx.fillStyle = ng; ctx.fillRect(x, yh - 9, w, 18);
+    ctx.fillStyle = 'rgba(5,2,15,.5)'; ctx.fillRect(x + 4, yh + 3, w - 8, 3);
+  }
+}
+function drawFX() {
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const p of parts) {
+    const a = clamp(p.life / p.max, 0, 1); ctx.globalAlpha = a; ctx.strokeStyle = p.col; ctx.lineWidth = p.size * a + .5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * .03, p.y - p.vy * .03); ctx.stroke();
+  }
+  for (const r of rings) { const k = 1 - r.life / r.max; ctx.globalAlpha = 1 - k; ctx.strokeStyle = r.col; ctx.lineWidth = Math.max(.5, r.w * (1 - k)); ctx.beginPath(); ctx.arc(r.x, r.y, lerp(r.r0, r.r1, eo(k)), 0, TAU); ctx.stroke(); }
+  ctx.restore();
+  for (const t of texts) { ctx.globalAlpha = 1 - t.t / t.max; txt(t.s, t.x, t.y, t.size, t.col, { st: 4 }); } ctx.globalAlpha = 1;
+}
+function drawPlayHUD() {
+  const jy = JY(), cx = LW / 2;
+  // 판정
+  if (judgeShow && judgeShow.t < .55) {
+    const j = judgeShow, k = j.t, sc = k < .08 ? eb(k / .08) * 1.35 : 1.35 - .35 * eo((k - .08) / .15), a = 1 - clamp((k - .35) / .2, 0, 1);
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(cx, jy - 170 - (j.g === 'M' ? -k * 30 : 0)); ctx.scale(sc, sc); if (j.g === 'M') ctx.rotate(.08);
+    ctx.globalCompositeOperation = 'lighter';
+    if (j.g === 'P') { txt(JNAME[j.g], -3, 0, 40, 'rgba(255,61,245,.6)'); txt(JNAME[j.g], 3, 0, 40, 'rgba(63,240,255,.6)'); }
+    ctx.globalCompositeOperation = 'source-over';
+    txt(JNAME[j.g], 0, 0, 40, JCOL[j.g], { st: 6 });
+    if (j.g !== 'M' && j.g !== 'P' && j.dt) txt(j.dt < 0 ? 'EARLY' : 'LATE', 0, 30, 13, j.dt < 0 ? '#7fb8ff' : '#ff9d6a', { it: false, st: 3 });
+    ctx.restore();
+  }
+  // 콤보
+  if (combo >= 3) {
+    const sc = 1 + comboPop * .35;
+    ctx.save(); ctx.translate(cx, jy - 280); ctx.scale(sc, sc); ctx.globalAlpha = .9;
+    txt(String(combo), 0, 0, 64, fever ? `hsl(${(time * 200) % 360},100%,70%)` : '#fff', { st: 7 });
+    txt(fever ? 'FEVER COMBO' : 'COMBO', 0, 40, 14, fever ? '#ffd84a' : song.col, { it: false, st: 4 });
+    ctx.restore();
+  }
+  // 상단 정보
+  txt(Math.floor(dispScore).toLocaleString().padStart(7, ' '), LW - 20, 30, 30, '#fff', { al: 'right', st: 6 });
+  txt(accuracy().toFixed(2) + '%', LW - 20, 58, 14, '#ffb3e6', { al: 'right', it: false, st: 3 });
+  txt(song.name, 20, 28, 18, song.col, { al: 'left', st: 4 });
+  txt('BPM ' + song.bpm + '  ·  ' + '★'.repeat(song.diff) + '  ·  속도 ×' + speedMod.toFixed(1), 20, 50, 12, '#e6dcff', { al: 'left', it: false, st: 3 });
+  // 진행바
+  const prog = clamp(songT() / chart.len, 0, 1);
+  ctx.fillStyle = 'rgba(255,255,255,.1)'; ctx.fillRect(0, 0, LW, 4); ctx.fillStyle = fever ? '#ffd84a' : song.col; ctx.fillRect(0, 0, LW * prog, 4);
+  // 피버 게이지
+  const fx = 20, fy = 70, fw = 140;
+  txt('FEVER', fx, fy + 4, 11, '#ffd84a', { al: 'left', it: false, st: 3 });
+  para(fx + 46, fy - 2, fw - 46, 10, 3); ctx.fillStyle = 'rgba(40,30,0,.6)'; ctx.fill();
+  ctx.save(); para(fx + 46, fy - 2, fw - 46, 10, 3); ctx.clip();
+  ctx.fillStyle = fever ? `hsl(${(time * 300) % 360},100%,60%)` : '#ffd84a'; ctx.fillRect(fx + 46, fy - 2, (fw - 46) * (fever ? 1 : clamp(combo / 50, 0, 1)), 10); ctx.restore();
+  // 카운트다운
+  const t = songT(), bl = 60 / song.bpm;
+  if (t < 0) {
+    const n = Math.ceil(-t / bl);
+    const k = 1 - ((-t / bl) % 1);
+    if (n <= 3) { ctx.save(); ctx.globalAlpha = 1 - k * .7; ctx.translate(cx, LH * .4); ctx.scale(2 - eo(k), 2 - eo(k)); txt(String(n), 0, 0, 90, '#fff', { st: 8 }); ctx.restore(); }
+    else txt('READY', cx, LH * .4, 46, song.col, { st: 6 });
+  } else if (t < bl) { ctx.save(); ctx.globalAlpha = 1 - t / bl; ctx.translate(cx, LH * .4); ctx.scale(1 + t / bl, 1 + t / bl); txt('GO!', 0, 0, 80, '#ffd84a', { st: 8 }); ctx.restore(); }
+  if (stT < 5 && !isTouch) { ctx.globalAlpha = clamp(5 - stT, 0, 1) * .8; txt('Esc: 곡 선택으로', LW - 20, LH - 14, 11, '#b9a3e0', { al: 'right', it: false }); ctx.globalAlpha = 1; }
+}
+function drawBanner(b) {
+  const t = b.t, d = b.dur, inT = .25, outT = .25, cy = LH * .22;
+  let off = 0;
+  if (t < inT) off = (1 - eo(t / inT)) * LW; else if (t > d - outT) off = -eo((t - (d - outT)) / outT) * LW; else off = -(t - inT) * 20;
+  const bh = 78 * eo(Math.min(1, t / .18)) * (t > d - outT ? 1 - eo((t - (d - outT)) / outT) : 1);
+  ctx.save(); ctx.fillStyle = 'rgba(5,2,15,.6)'; ctx.fillRect(-20, cy - bh / 2, LW + 40, bh);
+  ctx.beginPath(); ctx.rect(-20, cy - bh / 2, LW + 40, bh); ctx.clip();
+  ctx.globalAlpha = .14; ctx.fillStyle = b.col; const so = (time * 120) % 40;
+  for (let x = -60 + so; x < LW + 60; x += 40) { ctx.beginPath(); ctx.moveTo(x, cy - bh / 2); ctx.lineTo(x + 18, cy - bh / 2); ctx.lineTo(x - 12, cy + bh / 2); ctx.lineTo(x - 30, cy + bh / 2); ctx.fill(); }
+  ctx.restore();
+  ctx.fillStyle = b.col; ctx.fillRect(-20, cy - bh / 2 - 2, LW + 40, 2); ctx.fillRect(-20, cy + bh / 2, LW + 40, 2);
+  if (bh < 20) return;
+  ctx.save(); ctx.translate(LW / 2 + off, cy - (b.sub ? 8 : 0)); ctx.transform(1, 0, -.15, 1, 0, 0);
+  const pop = t < .3 ? 1 + (1 - eo(t / .3)) * .4 : 1, size = Math.min(50, LW * 1.4 / Math.max(6, b.txt.length));
+  ctx.scale(pop, pop); ctx.globalCompositeOperation = 'lighter';
+  txt(b.txt, -3, 0, size, 'rgba(255,40,90,.7)'); txt(b.txt, 3, 0, size, 'rgba(40,220,255,.7)');
+  ctx.globalCompositeOperation = 'source-over'; txt(b.txt, 0, 0, size, '#fff', { st: 3, sc: b.col }); ctx.restore();
+  if (b.sub) { ctx.globalAlpha = clamp((t - .2) / .2, 0, 1); txt(b.sub, LW / 2 - off * .5, cy + 26, 15, b.col, { it: false, st: 4 }); ctx.globalAlpha = 1; }
+}
+function menuBtn() {
+  ctx.fillStyle = 'rgba(10,4,30,.7)'; para(14, 14, 92, 28, 6); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,216,74,.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+  txt('← 메뉴 (Q)', 62, 28, 12, '#ffd84a', { it: false });
+}
+function cardRects() {
+  const n = SONGS.length, narrow = LW < 760;
+  if (narrow) { const w = Math.min(LW - 40, 420), h = 92; return SONGS.map((s, i) => ({ x: LW / 2 - w / 2, y: 170 + i * (h + 14), w, h })); }
+  const w = Math.min(250, (LW - 80) / 3), h = 230, gap = 20, tw = n * w + (n - 1) * gap;
+  return SONGS.map((s, i) => ({ x: LW / 2 - tw / 2 + i * (w + gap), y: 175, w, h }));
+}
+function drawSelect() {
+  ctx.fillStyle = 'rgba(4,1,13,.35)'; ctx.fillRect(0, 0, LW, LH);
+  // 로고
+  const title = 'BEAT PULSE', size = Math.min(70, LW / 8);
+  ctx.font = `italic 900 ${size}px ${FONT}`;
+  const ws = [...title].map(c => ctx.measureText(c).width), tw = ws.reduce((a, b) => a + b, 0);
+  let x = LW / 2 - tw / 2;
+  const bi = beatInfo(), pulse = Math.pow(1 - (((bi.beat % 1) + 1) % 1), 3);
+  [...title].forEach((c, i) => {
+    const k = (stT - .06 * i) / .6, yo = (1 - eb(k)) * -200, cx = x + ws[i] / 2, cy = 82 + yo - (i % 2 ? pulse * 6 : 0);
+    ctx.globalAlpha = clamp(k * 3, 0, 1); ctx.globalCompositeOperation = 'lighter';
+    txt(c, cx - 3, cy, size, 'rgba(255,40,120,.8)'); txt(c, cx + 3, cy, size, 'rgba(40,230,255,.8)');
+    ctx.globalCompositeOperation = 'source-over'; txt(c, cx, cy, size, '#fff', { st: 2, sc: '#ffd84a' }); x += ws[i];
+  });
+  ctx.globalAlpha = clamp((stT - .8) * 2, 0, 1);
+  txt('곡을 선택하세요', LW / 2, 135, 16, '#ffb3e6', { it: false, st: 4 });
+  const rs = cardRects(), narrow = LW < 760;
+  rs.forEach((r, i) => {
+    const s = SONGS[i], on = i === sel, k = eo((stT - .9 - i * .12) / .5);
+    if (k <= 0) return;
+    const bp = on ? Math.pow(1 - (((time / (60 / s.bpm)) % 1)), 3) : 0;
+    ctx.save(); ctx.globalAlpha = k; ctx.translate(r.x + r.w / 2, r.y + r.h / 2 + (1 - k) * 60); const sc = on ? 1.05 + bp * .03 + selPop * .05 : .95; ctx.scale(sc, sc);
+    const w = r.w, h = r.h;
+    ctx.fillStyle = on ? 'rgba(20,8,48,.92)' : 'rgba(12,5,32,.75)'; ctx.fillRect(-w / 2, -h / 2, w, h);
+    if (on) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = s.col; ctx.globalAlpha = .3 + bp * .5; ctx.lineWidth = 10; ctx.strokeRect(-w / 2, -h / 2, w, h); ctx.restore(); }
+    ctx.strokeStyle = on ? s.col : 'rgba(255,255,255,.2)'; ctx.lineWidth = 2; ctx.strokeRect(-w / 2, -h / 2, w, h);
+    const bs = best[s.id] ? Math.floor(best[s.id]).toLocaleString() : '-';
+    if (!narrow) {
+      // 미니 비주얼
+      ctx.save(); ctx.beginPath(); ctx.rect(-w / 2 + 10, -h / 2 + 10, w - 20, 80); ctx.clip();
+      ctx.fillStyle = '#06021a'; ctx.fillRect(-w / 2 + 10, -h / 2 + 10, w - 20, 80);
+      for (let b = 0; b < 14; b++) { const hh = (Math.abs(Math.sin(time * (s.bpm / 40) + b * .8)) * .6 + bp * .4) * 60 + 4; ctx.fillStyle = s.col; ctx.globalAlpha = on ? .7 : .3; ctx.fillRect(-w / 2 + 14 + b * ((w - 28) / 14), -h / 2 + 88 - hh, (w - 28) / 14 - 3, hh); }
+      ctx.restore(); ctx.globalAlpha = k;
+      txt(s.name, 0, -h / 2 + 116, Math.min(22, w / 10), s.col, { st: 4 });
+      txt(s.sub, 0, -h / 2 + 140, 13, '#e6dcff', { it: false });
+      txt('BPM ' + s.bpm + '   ' + '★'.repeat(s.diff) + '☆'.repeat(3 - s.diff), 0, -h / 2 + 166, 14, '#ffd84a', { it: false });
+      txt(`노트 ${s.noteCount} · ${Math.round(s.dur)}초`, 0, -h / 2 + 188, 12, '#b9a3e0', { it: false });
+      txt('BEST ' + bs, 0, -h / 2 + 210, 13, '#fff', { it: false });
+    } else {
+      txt(s.name, -w / 2 + 16, -18, 20, s.col, { al: 'left', st: 4 });
+      txt(s.sub + '  ·  BPM ' + s.bpm, -w / 2 + 16, 8, 12, '#e6dcff', { al: 'left', it: false });
+      txt('BEST ' + bs, -w / 2 + 16, 28, 12, '#fff', { al: 'left', it: false });
+      txt('★'.repeat(s.diff) + '☆'.repeat(3 - s.diff), w / 2 - 16, 0, 16, '#ffd84a', { al: 'right', it: false });
+    }
+    ctx.restore();
+  });
+  ctx.globalAlpha = clamp((stT - 1.4) * 2, 0, 1);
+  const y = narrow ? 170 + 3 * 106 + 2 : 440;
+  txt(`속도 ×${speedMod.toFixed(1)}   ·   싱크 ${offsetMs > 0 ? '+' : ''}${offsetMs}ms`, LW / 2, y, 15, '#7ffcff', { it: false, st: 4 });
+  if (!isTouch) txt('←/→ 곡 선택 · Enter 시작 · ↑/↓ 노트 속도 · [ / ] 싱크 조절 · M 음소거', LW / 2, y + 26, 12, '#b9a3e0', { it: false, st: 3 });
+  ctx.globalAlpha = clamp((stT - 1.4) * 2, 0, 1) * (.55 + .45 * Math.sin(time * 5));
+  txt(isTouch ? '선택한 곡을 한 번 더 탭하여 시작' : 'ENTER 또는 클릭으로 시작', LW / 2, y + (narrow ? 52 : 62), 22, '#fff', { st: 5 });
+  ctx.globalAlpha = 1;
+  if (!narrow) txt('레인 키:  D  F  J  K', LW / 2, LH - 24, 14, '#ffd84a', { it: false, st: 3 });
+  menuBtn();
+}
+function drawResult() {
+  const k = resultT;
+  ctx.fillStyle = `rgba(4,1,13,${.75 * clamp(k * 2, 0, 1)})`; ctx.fillRect(0, 0, LW, LH);
+  txt(song.name, LW / 2, 50, 28, song.col, { st: 5 });
+  txt('RESULT', LW / 2, 82, 14, '#e6dcff', { it: false, st: 3 });
+  // 랭크 도장
+  const rk = rank(), rcol = { S: '#ffd84a', A: '#7ffcff', B: '#ff9df9', C: '#b9a3e0' }[rk];
+  const rs = k < 1 ? 0 : k < 1.3 ? 4 - 3 * eo((k - 1) / .3) : 1;
+  if (k > 1.28 && !drawResult.boomed) { drawResult.boomed = true; shake = 14; flash = .6; flashCol = rcol; ring(LW * .3 + 0, 250, 20, 220, rcol, .6, 8); sparks(LW * .3, 250, 40, [rcol, '#fff'], 1.6); tone(120, 40, .4, 'sine', .5); }
+  const rx = LW < 700 ? LW / 2 : LW * .3, ry = LW < 700 ? 175 : 250;
+  if (rs > 0) {
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(-.12 * (rs > 1 ? rs : 1)); ctx.scale(rs, rs);
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = rcol; ctx.globalAlpha = .25; ctx.beginPath(); ctx.arc(0, 0, 95, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = rcol; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(0, 0, 82, 0, TAU); ctx.stroke(); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 70, 0, TAU); ctx.stroke();
+    txt(rk, 0, 4, 120, rcol, { st: 6 }); ctx.restore();
+  }
+  if (counts.M === 0 && k > 1.5) { ctx.save(); ctx.translate(rx, ry + 110); const p = 1 + Math.sin(time * 6) * .05; ctx.scale(p, p); txt('FULL COMBO!', 0, 0, 24, `hsl(${(time * 200) % 360},100%,70%)`, { st: 5 }); ctx.restore(); }
+  // 수치
+  const sx = LW < 700 ? LW / 2 - 110 : LW * .55, sy = LW < 700 ? 320 : 150;
+  const show = Math.floor(lerp(0, score, eo((k - .3) / 1.2)));
+  if (k > .3) { txt('SCORE', sx, sy, 13, '#b9a3e0', { al: 'left', it: false }); txt(show.toLocaleString(), sx, sy + 32, 40, '#fff', { al: 'left', st: 6 }); }
+  const rows = [['PERFECT', counts.P, JCOL.P], ['GREAT', counts.G, JCOL.G], ['GOOD', counts.O, JCOL.O], ['MISS', counts.M, JCOL.M], ['MAX COMBO', maxCombo, '#fff'], ['ACCURACY', accuracy().toFixed(2) + '%', '#ffd84a']];
+  rows.forEach((r, i) => {
+    const kk = eo((k - .5 - i * .1) / .3); if (kk <= 0) return;
+    ctx.globalAlpha = kk; const ox = (1 - kk) * 60;
+    txt(r[0], sx + ox, sy + 76 + i * 28, 15, r[2], { al: 'left', it: false, st: 3 });
+    txt(String(r[1]), sx + 220 + ox, sy + 76 + i * 28, 18, '#fff', { al: 'right', st: 4 });
+  });
+  ctx.globalAlpha = 1;
+  if (newRecord && k > 1.6 && Math.floor(time * 5) % 2) txt('NEW RECORD!', sx + 110, sy + 76 + 6 * 28 + 10, 22, '#ffd84a', { st: 5 });
+  if (k > 1.6) { ctx.globalAlpha = .55 + .45 * Math.sin(time * 5); txt(isTouch ? '탭하여 곡 선택으로' : 'Enter 곡 선택 · R 다시 하기 · Q 메뉴', LW / 2, LH - 30, 18, '#fff', { st: 5, it: false }); ctx.globalAlpha = 1; }
+  menuBtn();
+}
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#04010d'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(DPR * S, 0, 0, DPR * S, 0, 0);
+  ctx.save();
+  if (shake) ctx.translate((Math.random() * 2 - 1) * shake, (Math.random() * 2 - 1) * shake);
+  drawBG();
+  if (state !== 'select') { drawLanes(); drawNotes(); drawFX(); }
+  ctx.restore();
+  if (state === 'play') drawPlayHUD();
+  if (state === 'select') drawSelect();
+  if (state === 'result') drawResult();
+  if (state !== 'play') drawFX();
+  for (const b of banners) drawBanner(b);
+  if (flash > 0) { ctx.globalAlpha = clamp(flash, 0, 1) * .5; ctx.fillStyle = flashCol; ctx.fillRect(0, 0, LW, LH); ctx.globalAlpha = 1; }
+  const vg = ctx.createRadialGradient(LW / 2, LH / 2, LH * .35, LW / 2, LH / 2, Math.max(LW, LH) * .75); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.55)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, LW, LH);
+  if (muted) txt('🔇', LW - 22, LH - 20, 16, '#fff', { it: false });
+}
+
+/* ---------------- 입력 ---------------- */
+const goMenu = () => { location.href = 'index.html'; };
+function selMove(d) { sel = (sel + d + SONGS.length) % SONGS.length; selPop = 1; initAudio(); const s = SONGS[sel]; tone(mtof(s.root + 12), mtof(s.root + 12), .1, 'square', .05); tone(mtof(s.root + 19), mtof(s.root + 19), .12, 'square', .04, AC ? AC.currentTime + .07 : 0); }
+function toSelect() { state = 'select'; stT = 1.4; drawResult.boomed = false; fever = false; parts = []; rings = []; }
+addEventListener('keydown', e => {
+  const k = e.code;
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+  if (e.repeat) return;
+  initAudio();
+  const li = KEYS.indexOf(k);
+  if (li >= 0) { press(li); if (state === 'play') return; }
+  if (k === 'KeyM') { muted = !muted; return; }
+  if (state === 'select') {
+    if (k === 'ArrowLeft') selMove(-1);
+    else if (k === 'ArrowRight') selMove(1);
+    else if (k === 'ArrowUp') { speedMod = clamp(Math.round((speedMod + .1) * 10) / 10, .5, 2.5); saveOpt(); }
+    else if (k === 'ArrowDown') { speedMod = clamp(Math.round((speedMod - .1) * 10) / 10, .5, 2.5); saveOpt(); }
+    else if (k === 'BracketLeft') { offsetMs = clamp(offsetMs - 5, -200, 200); saveOpt(); }
+    else if (k === 'BracketRight') { offsetMs = clamp(offsetMs + 5, -200, 200); saveOpt(); }
+    else if (k === 'Enter' || k === 'Space') startSong(sel);
+    else if (k === 'KeyQ') goMenu();
+  } else if (state === 'play') {
+    if (k === 'Escape') toSelect();
+  } else if (state === 'result' && resultT > 1) {
+    if (k === 'Enter' || k === 'Space') toSelect();
+    else if (k === 'KeyR') { drawResult.boomed = false; startSong(SONGS.indexOf(song)); }
+    else if (k === 'KeyQ') goMenu();
+  }
+});
+addEventListener('keyup', e => { const li = KEYS.indexOf(e.code); if (li >= 0) release(li); });
+const touchLane = {};
+cv.addEventListener('pointerdown', e => {
+  initAudio(); if (e.pointerType === 'touch') isTouch = true;
+  const x = e.clientX / S, y = e.clientY / S;
+  if (state !== 'play' && x < 112 && y < 48) { goMenu(); return; }
+  if (state === 'play') {
+    const l = Math.floor((x - laneX(0)) / laneW());
+    if (l >= 0 && l < 4) { touchLane[e.pointerId] = l; press(l); try { cv.setPointerCapture(e.pointerId); } catch (er) {} }
+    return;
+  }
+  if (state === 'select') {
+    const rs = cardRects();
+    for (let i = 0; i < rs.length; i++) { const r = rs[i]; if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) { if (i === sel) startSong(i); else selMove(i - sel); return; } }
+    if (!isTouch) startSong(sel);
+    return;
+  }
+  if (state === 'result' && resultT > 1.6) toSelect();
+});
+const upTouch = e => { const l = touchLane[e.pointerId]; if (l != null) { delete touchLane[e.pointerId]; release(l); } };
+cv.addEventListener('pointerup', upTouch); cv.addEventListener('pointercancel', upTouch);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------------- 시작 ---------------- */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2); W = innerWidth || 960; H = innerHeight || 600;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR); S = H / LH; LW = W / S;
+}
+addEventListener('resize', resize); resize();
+let last = performance.now();
+function loop(t) { const dt = Math.min(.05, (t - last) / 1000); last = t; update(dt); render(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
